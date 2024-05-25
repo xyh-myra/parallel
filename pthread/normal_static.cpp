@@ -1,0 +1,138 @@
+#include<iostream>
+#include <stdio.h>
+#include<typeinfo>
+#include <stdlib.h>
+#include<semaphore.h>
+#include<pthread.h>
+#include<tmmintrin.h>
+#include<xmmintrin.h>
+#include<emmintrin.h>
+#include<pmmintrin.h>
+#include<smmintrin.h>
+#include<nmmintrin.h>
+#include<immintrin.h>
+#include<windows.h>
+using namespace std;
+#define N 1000
+
+#define NUM_THREADS 7
+float A[N][N];
+
+
+long long head, tail, freq;
+
+sem_t sem_main;  //信号量
+sem_t sem_workstart[NUM_THREADS];
+sem_t sem_workend[NUM_THREADS];
+
+sem_t sem_leader;
+sem_t sem_Division[NUM_THREADS];
+sem_t sem_Elimination[NUM_THREADS];
+
+pthread_barrier_t barrier_Division;
+pthread_barrier_t barrier_Elimination;
+
+struct threadParam_t {    //参数数据结构
+    int k;
+    int t_id;
+};
+
+void A_init() {     //未对齐的数组的初始化
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < i; j++)
+            A[i][j] = 0;
+        A[i][i] = 1.0;
+        for (int j = i + 1; j < N; j++)
+            A[i][j] = rand() % 1000;
+    }
+    for (int k = 0; k < N; k++)
+        for (int i = k + 1; i < N; i++)
+            for (int j = 0; j < N; j++)
+                A[i][j] += A[k][j];
+}
+void* LU_sem_threadFunc(void* param) {  //平凡，动态8线程+信号量
+    threadParam_t* p = (threadParam_t*)param;
+    int t_id = p->t_id;
+
+    for (int k = 0; k < N; k++) {
+        sem_wait(&sem_workstart[t_id]);//阻塞，等待主线程除法完成
+
+        for (int i = k + 1 + t_id; i < N; i += NUM_THREADS) {
+            for (int j = k + 1; j < N; j++) {
+                A[i][j] = A[i][j] - A[i][k] * A[k][j];
+            }
+            A[i][k] = 0;
+        }
+
+        sem_post(&sem_main);        //唤醒主线程
+        sem_wait(&sem_workend[t_id]);  //阻塞，等待主线程唤醒进入下一轮
+
+    }
+    pthread_exit(NULL);
+    return NULL;
+}
+
+void LU_sem_static() {//平凡
+    sem_init(&sem_main, 0, 0); //初始化信号量
+    for (int i = 0; i < NUM_THREADS; i++) {
+        sem_init(&sem_workend[i], 0, 0);
+        sem_init(&sem_workstart[i], 0, 0);
+    }
+    pthread_t* handles = (pthread_t*)malloc(NUM_THREADS * sizeof(pthread_t));//创建对应的handle
+    threadParam_t* param = (threadParam_t*)malloc(NUM_THREADS * sizeof(threadParam_t));//创建对应的线程数据结构
+    for (int t_id = 0; t_id < NUM_THREADS; t_id++) {
+        param[t_id].t_id = t_id;
+        // param[t_id].k = 0;
+        pthread_create(&handles[t_id], NULL, LU_sem_threadFunc, &param[t_id]);
+
+    }
+
+    for (int k = 0; k < N; k++) {
+
+        for (int j = k + 1; j < N; j++) {
+            A[k][j] = A[k][j] / A[k][k];
+        }
+        A[k][k] = 1.0;
+
+        for (int t_id = 0; t_id < NUM_THREADS; t_id++) {  //唤起子线程
+            sem_post(&sem_workstart[t_id]);
+        }
+
+        for (int t_id = 0; t_id < NUM_THREADS; t_id++) {  //主线程睡眠
+            sem_wait(&sem_main);
+        }
+
+        for (int t_id = 0; t_id < NUM_THREADS; t_id++) {  //再次唤起工作线程，进入下一轮消去
+            sem_post(&sem_workend[t_id]);
+        }
+
+    }
+    for (int t_id = 0; t_id < NUM_THREADS; t_id++) {
+        pthread_join(handles[t_id], NULL);
+    }
+    sem_destroy(&sem_main);    //销毁线程
+    for (int t_id = 0; t_id < NUM_THREADS; t_id++)
+        sem_destroy(&sem_workstart[t_id]);
+    for (int t_id = 0; t_id < NUM_THREADS; t_id++)
+        sem_destroy(&sem_workend[t_id]);
+
+    free(handles);
+    free(param);
+}
+
+void test(void(*func)()) {
+    A_init();
+    QueryPerformanceCounter((LARGE_INTEGER*)&head);
+    func();
+    QueryPerformanceCounter((LARGE_INTEGER*)&tail);
+
+}
+int main() {
+
+    QueryPerformanceFrequency((LARGE_INTEGER*)&freq);
+    for (int i = 0; i < 10; i++) {
+        test(LU_sem_static);
+        cout << (tail - head) * 1000 / freq << endl;
+    }
+}
